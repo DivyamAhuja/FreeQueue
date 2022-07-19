@@ -6,6 +6,22 @@ export interface FreeQueuePointers {
   channelsPointer: number;
 }
 
+/**
+ * A shared storage for FreeQueue operation backed by SharedArrayBuffer.
+ *
+ * @typedef SharedRingBuffer
+ * @property {Uint32Array} states Backed by SharedArrayBuffer.
+ * @property {number} bufferLength The frame buffer length. Should be identical
+ * throughout channels.
+ * @property {Array<Float32Array>} channels The length must be > 0.
+ * @property {number} channelCount same with channelData.length
+ */
+
+/**
+ * A single-producer/single-consumer lock-free FIFO backed by SharedArrayBuffer.
+ * In a typical pattern is that a worklet pulls the data from the queue and a
+ * worker renders audio data to fill in the queue.
+ */
 export class FreeQueue {
   private states: Uint32Array;
   private channels: Float32Array[];
@@ -17,6 +33,13 @@ export class FreeQueue {
     WRITE: 1,
   };
 
+  /**
+   * FreeQueue constructor. A shared buffer created by this constuctor
+   * will be shared between two threads.
+   *
+   * @param {number} size Frame buffer length.
+   * @param {number} channelCount Total channel count.
+   */
   constructor(size: number, channelCount = 1) {
     this.states = new Uint32Array(
       new SharedArrayBuffer(
@@ -39,17 +62,17 @@ export class FreeQueue {
   }
 
   static fromPointers(fqPointers: FreeQueuePointers) {
-    let fq = new FreeQueue(0, 0);
-    let HEAPU32 = new Uint32Array(fqPointers.memory.buffer);
-    let HEAPF32 = new Float32Array(fqPointers.memory.buffer);
+    const fq = new FreeQueue(0, 0);
+    const HEAPU32 = new Uint32Array(fqPointers.memory.buffer);
+    const HEAPF32 = new Float32Array(fqPointers.memory.buffer);
 
-    let bufferLength = HEAPU32[fqPointers.bufferLengthPointer / 4];
-    let channelCount = HEAPU32[fqPointers.channelCountPointer / 4];
-    let states = HEAPU32.subarray(
+    const bufferLength = HEAPU32[fqPointers.bufferLengthPointer / 4];
+    const channelCount = HEAPU32[fqPointers.channelCountPointer / 4];
+    const states = HEAPU32.subarray(
       HEAPU32[fqPointers.statePointer / 4] / 4,
       HEAPU32[fqPointers.statePointer / 4] / 4 + 2
     );
-    let channels = [];
+    const channels = [];
     for (let i = 0; i < channelCount; i++) {
       channels.push(
         HEAPF32.subarray(
@@ -68,6 +91,15 @@ export class FreeQueue {
     return fq;
   }
 
+  /**
+   * Pushes the data into queue. Used by producer.
+   *
+   * @param {Float32Array[]} input Its length must match with the channel
+   *   count of this queue.
+   * @param {number} blockLength Input block frame length. It must be identical
+   *   throughout channels.
+   * @return {boolean} False if the operation fails.
+   */
   push(input: Float32Array[], blockLength: number): boolean {
     const currentRead = Atomics.load(this.states, FreeQueue.States.READ);
     const currentWrite = Atomics.load(this.states, FreeQueue.States.WRITE);
@@ -103,6 +135,15 @@ export class FreeQueue {
     return true;
   }
 
+  /**
+   * Pulls data out of the queue. Used by consumer.
+   *
+   * @param {Float32Array[]} output Its length must match with the channel
+   *   count of this queue.
+   * @param {number} blockLength output block length. It must be identical
+   *   throughout channels.
+   * @return {boolean} False if the operation fails.
+   */
   pull(output: Float32Array[], blockLength: number): boolean {
     const currentRead = Atomics.load(this.states, FreeQueue.States.READ);
     const currentWrite = Atomics.load(this.states, FreeQueue.States.WRITE);
@@ -145,6 +186,18 @@ export class FreeQueue {
     });
   }
 
+  getAvailableBytes() {
+    const currentRead = Atomics.load(this.states, FreeQueue.States.READ);
+    const currentWrite = Atomics.load(this.states, FreeQueue.States.WRITE);
+    return this._getAvailableRead(currentRead, currentWrite);
+  }
+
+  isFrameAvailable(size: number) {
+    return this.getAvailableBytes() >= size;
+  }
+  /**
+   * @return {number}
+   */
   private getBufferLength(): number {
     return this.bufferLength - 1;
   }
